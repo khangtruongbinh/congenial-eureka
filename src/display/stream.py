@@ -5,37 +5,35 @@ import threading
 import time
 
 import cv2 as cv
-from datetime import datetime
 from PyQt5 import QtCore, QtGui, uic
-from PyQt5.QtWidgets import QWidget, QMainWindow, QApplication, QDesktopWidget
-from PyQt5.QtMultimediaWidgets import QVideoWidget
 from PyQt5.QtCore import QUrl
-from PyQt5.QtWidgets import QApplication, QPushButton
 from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
-from src.video_processing.shared import SharedObj
+from PyQt5.QtMultimediaWidgets import QVideoWidget
+from PyQt5.QtWidgets import QApplication, QPushButton
+from PyQt5.QtWidgets import QWidget, QMainWindow, QDesktopWidget
+
 from config.config import get_config
 from constant.constants import NUM_FRAMES_PER_CLIP
 from src.display.single_video import data_process
+from src.video_processing.args import cli
 from src.video_processing.c3d_realtime import process_images
-from src.video_processing.graph_util import ImportGraph, load_graph
-from src.display.single_video import add_predict
+from src.video_processing.network import PifPaf, MonoLoco
+from src.video_processing.shared import SharedObj
+from src.display.single_video import visualize, add_predict
+
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp"
 
 running = False
 q1 = queue.Queue()
-q2 = queue.Queue()
+# q2 = queue.Queue()
 FRAMES_QUEUE_1 = queue.Queue(maxsize=NUM_FRAMES_PER_CLIP)
-FRAMES_QUEUE_2 = queue.Queue(maxsize=NUM_FRAMES_PER_CLIP)
+# FRAMES_QUEUE_2 = queue.Queue(maxsize=NUM_FRAMES_PER_CLIP)
 
 isStop = False
 low_threshold = False
 
-HIGH_LEVEL_ALERT = [0.8, 0.85, 0.9]
-LOW_LEVEL_ALERT = [0.6, 0.7, 0.8]
-ALERT_LEVEL = HIGH_LEVEL_ALERT
 
-
-def grab(cam, display_queue, frame_queue, confidence):
+def grab(cam, display_queue, frame_queue, confidence, args):
     global running
     global isStop
     global ALERT_LEVEL
@@ -54,17 +52,18 @@ def grab(cam, display_queue, frame_queue, confidence):
                     print(str(ex))
                     pass
             count += 1
-            pre_process_frame = data_process(img)
+            # data_process(img, args)
+            pre_process_frame = data_process(img, args)
             if frame_queue.full():
                 frame_queue.get()
-                frame_queue.get()
             frame_queue.put(pre_process_frame)
-            frame_queue.put(pre_process_frame)
-            if confidence.confidence > ALERT_LEVEL[0] and count % 60 < 40:
-                add_predict(img, predict=1, confidence_score=confidence.confidence, alert_level=ALERT_LEVEL)
+            # # if confidence.confidence > ALERT_LEVEL[0] and count % 60 < 40:
+            # #     add_predict(img, predict=1, confidence_score=confidence.confidence, alert_level=ALERT_LEVEL)
+            if count % 60 < 40:
+                visualize(img, confidence.image_loc, args.scale)
             img = cv.cvtColor(img, cv.COLOR_RGB2BGR)
             display_queue.put(img)
-            time.sleep(0.003)
+            time.sleep(0.07)
         while not display_queue.empty():
             display_queue.get_nowait()
         while isStop:
@@ -91,17 +90,18 @@ class OwnImageWidget(QWidget):
 
 
 class Main(QMainWindow, uic.loadUiType("mainwindow.ui")[0]):
-    def __init__(self, confidence_1, confidence_2, parent=None):
+    def __init__(self, confidence_1, confidence_2, parent=None, args=None):
         QMainWindow.__init__(self, parent)
         self.setupUi(self)
         self.center()
+        self.args = args
         self.startButton.clicked.connect(self.start_streaming)
         # self.startButton.setStyleSheet("background: black; color: white;")
-        self.thresholdButton.clicked.connect(self.set_threshold)
+        # self.thresholdButton.clicked.connect(self.set_threshold)
         # self.thresholdButton.setStyleSheet("background: red; color: white;")
         self.addCam.clicked.connect(self.add_cam)
         self.Cam_1 = OwnImageWidget(self.Cam_1)
-        self.Cam_2 = OwnImageWidget(self.Cam_2)
+        # self.Cam_2 = OwnImageWidget(self.Cam_2)
         self.window_width = 600
         self.window_height = 525
         self.timer = QtCore.QTimer(self)
@@ -111,12 +111,12 @@ class Main(QMainWindow, uic.loadUiType("mainwindow.ui")[0]):
         self.confidence_2 = confidence_2
         self.queues = [
             [q1, self.Cam_1],
-            [q2, self.Cam_2]
+            # [q2, self.Cam_2]
         ]
         self.capture_threads = []
         self.process_threads = []
 
-        self.set_event_list()
+        # self.set_event_list()
         self.listEvent.itemClicked.connect(self.event_click)
 
     def center(self):
@@ -131,46 +131,34 @@ class Main(QMainWindow, uic.loadUiType("mainwindow.ui")[0]):
         capture_thread_1 = threading.Thread(
             target=grab,
             # args=("rtsp://admin:iphone3gs@%s:554/onvif1" % self.ipCam_1.text(), q1, FRAMES_QUEUE_1, self.confidence_1))
-            args=(get_config("video", "camera_1"), q1, FRAMES_QUEUE_1, self.confidence_1))
-        capture_thread_2 = threading.Thread(
-            target=grab,
-            # args=("rtsp://admin:iphone3gs@%s:554/onvif1" % self.ipCam_2.text(), q2, FRAMES_QUEUE_2, self.confidence_2))
-            args=(get_config("video", "camera_2"), q2, FRAMES_QUEUE_2, self.confidence_2))
+            args=(get_config("video", "camera_1"), q1, FRAMES_QUEUE_1, self.confidence_1, self.args))
+        # capture_thread_2 = threading.Thread(
+        #     target=grab,
+        #     # args=("rtsp://admin:iphone3gs@%s:554/onvif1" % self.ipCam_2.text(), q2, FRAMES_QUEUE_2, self.confidence_2))
+        #     args=(get_config("video", "camera_2"), q2, FRAMES_QUEUE_2, self.confidence_2, self.args))
 
         # Video processing thread
         process_thread_1 = threading.Thread(
             target=process_images,
-            args=(FRAMES_QUEUE_1, c3d_graph_1, confidence_1, name1,))
-        process_thread_2 = threading.Thread(
-            target=process_images,
-            args=(FRAMES_QUEUE_2, c3d_graph_2, confidence_2, name2,))
+            args=(FRAMES_QUEUE_1, pifpaf_1, monoloco_1, confidence_1, name1, self.args))
+        # process_thread_2 = threading.Thread(
+        #     target=process_images,
+        #     args=(FRAMES_QUEUE_2, pifpaf_2, monoloco_2, confidence_2, name2, self.args))
         # self.ipCam_1.setVisible(False)
         # self.ipCam_2.setVisible(False)
         # if self.ipCam_1.text() is not '':
         if not capture_thread_1.isAlive():
             capture_thread_1.start()
         # if self.ipCam_2.text() is not '':
-        if not capture_thread_2.isAlive():
-            capture_thread_2.start()
+        # if not capture_thread_2.isAlive():
+        #     capture_thread_2.start()
         if not process_thread_1.isAlive():
             process_thread_1.start()
-        if not process_thread_2.isAlive():
-            process_thread_2.start()
+        # if not process_thread_2.isAlive():
+        #     process_thread_2.start()
         self.startButton.setEnabled(False)
         self.startButton.setText('Starting...')
 
-    def set_threshold(self):
-        global low_threshold
-        global ALERT_LEVEL
-        low_threshold = not low_threshold
-        if low_threshold:
-            self.thresholdButton.setText('High Threshold')
-            self.thresholdButton.setStyleSheet("background: green; color: white;")
-            ALERT_LEVEL = LOW_LEVEL_ALERT
-        else:
-            self.thresholdButton.setText('Low Threshold')
-            self.thresholdButton.setStyleSheet("background: red; color: white;")
-            ALERT_LEVEL = HIGH_LEVEL_ALERT
 
     # Ham lay ip camera va them vao stream
     def add_cam(self):
@@ -239,16 +227,25 @@ class VideoPlayer:
 
 
 if __name__ == '__main__':
+    args = cli()
+    args.camera = True
+    args.webcam = True
+    args.scale = 0.5
     confidence_1 = SharedObj()
     confidence_2 = SharedObj()
     name1 = "cam_1"
     name2 = "cam_2"
-    graph = load_graph(get_config("model", "c3d"))
-    c3d_graph_1 = ImportGraph(graph)  # day la cho load frozen model
-    c3d_graph_2 = ImportGraph(graph)  # day la cho load frozen model
+    args.model = "/mnt/d/Antimatlab/multi-cam/weights/monoloco-190513-1437.pkl"
+    # graph = load_graph(get_config("model", "c3d"))
+    # c3d_graph_1 = ImportGraph(graph)  # day la cho load frozen model
+    # c3d_graph_2 = ImportGraph(graph)  # day la cho load frozen model
+    pifpaf_1 = PifPaf(args)
+    monoloco_1 = MonoLoco(model=args.model, device=args.device)
+    # pifpaf_2 = PifPaf(args)
+    # monoloco_2 = MonoLoco(model=args.model, device=args.device)
 
     app = QApplication(sys.argv)
-    form5 = Main(confidence_1, confidence_2)
+    form5 = Main(confidence_1, confidence_2, args=args)
     form5.setWindowTitle('AntiMatlab')
     form5.show()
     app.exec_()
